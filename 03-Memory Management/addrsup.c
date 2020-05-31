@@ -44,6 +44,11 @@ extern MM_AVL_TABLE MmSectionBasedRoot;
 #pragma warning(disable:4010)        // Allow pretty pictures without the noise
 #endif
 
+// MODIFY Xiaoyang Ma, 2020/5/29
+#define	RB_RED		0
+#define	RB_BLACK	1
+// END MODIFY
+
 TABLE_SEARCH_RESULT
 MiFindNodeOrParent (
     IN PMM_AVL_TABLE Table,
@@ -143,6 +148,75 @@ MiEnumerateGenericTableWithoutSplayingAvl (
     (RtlRightChild(MiParent(Links)) == (PRTL_SPLAY_LINKS)(Links)) \
     )
 
+// MODIFY Xiaoyang Ma, 2020/5/29
+// Add macros and inline functions similar to Linux rbtree
+#define MiIsBlack(Links) (                                        \
+    (Links->u1.Balance == RB_BLACK)                               \
+    )
+
+#define MiIsRed(Links) (                                          \
+    (Links->u1.Balance == RB_RED)                                 \
+    )
+
+#define MiRBParent(Links) (                                       \
+    (SANITIZE_PARENT_NODE((Links)->u1.Parent))                    \
+    )
+
+VOID 
+MiSetParentColor(
+	IN PMMADDRESS_NODE Links,
+	IN PMMADDRESS_NODE Parent,
+	IN ULONG Color
+)
+{
+	Links->u1.Parent = MI_MAKE_PARENT(Parent, Color);
+}
+
+VOID
+MiSetParent(
+    IN PMMADDRESS_NODE Links,
+    IN PMMADDRESS_NODE Parent
+)
+{
+    ULONG Color = Links->u1.Balance;
+	MiSetParentColor(Links, Parent, Color);
+}
+
+VOID
+MiChangeChild(
+    IN PMMADDRESS_NODE Old,
+    IN PMMADDRESS_NODE New,
+    IN PMMADDRESS_NODE Parent
+)
+{
+	if (Parent->LeftChild == Old)
+		Parent->LeftChild = New;
+	else
+		Parent->RightChild = New;
+}
+
+VOID
+MiRotateSetParents(
+    IN PMMADDRESS_NODE Old,
+    IN PMMADDRESS_NODE New,
+    IN ULONG Color
+)
+{
+    PMMADDRESS_NODE Parent = MiRBParent(Old);
+	New->u1 = Old->u1;
+	MiSetParentColor(Old, New, Color);
+    MiChangeChild(Old, New, Parent);
+}
+
+VOID
+MiSetBlack(
+    IN PMMADDRESS_NODE Links
+)
+{
+    Links->u1.Parent = MI_MAKE_PARENT(MiRBParent(Links), RB_BLACK);
+}
+
+// END MODIFY
 
 
 #if DBG
@@ -802,6 +876,8 @@ Environment:
     return TRUE;
 }
 
+// MODIFY Xiaoyang Ma, 2020/5/29
+// Change MiInsertNode into rbtree
 
 VOID
 FASTCALL
@@ -839,232 +915,268 @@ Environment:
 --*/
 
 {
-    PMMADDRESS_NODE Parent;
-    PMMADDRESS_NODE EasyDelete;
-    PMMADDRESS_NODE P;
-    SCHAR a;
+    PMMADDRESS_NODE Node = NodeToDelete;
+    PMMADDRESS_NODE Child = NodeToDelete->RightChild;
+	PMMADDRESS_NODE Temp = NodeToDelete->LeftChild;
+	PMMADDRESS_NODE Parent, Rebalance;
+	ULONG PC;
 
-    //
-    // If the NodeToDelete has at least one NULL child pointer, then we can
-    // delete it directly.
-    //
+	if (!Temp) {
+		/*
+		 * Case 1: node to erase has no more than 1 child (easy!)
+		 *
+		 * Note that if there is one child it must be red due to 5)
+		 * and node must be black due to 4). We adjust colors locally
+		 * so as to bypass __rb_erase_color() later on.
+		 */
+		PC = (ULONG)Node->u1.Parent;
+		Parent = MiRBParent(Node);
+		MiChangeChild(Node, Child, Parent);
+		if (Child) {
+			Child->u1.Parent = (PMMADDRESS_NODE)PC;
+			Rebalance = NULL;
+		} else
+			Rebalance = MiIsBlack(Node) ? Parent : NULL;
+		Temp = Parent;
+	} else if (!Child) {
+		/* Still case 1, but this time the child is Node->LeftChild */
+		PC = (ULONG)Node->u1.Parent;
+        Temp->u1.Parent = (PMMADDRESS_NODE)PC;
+		Parent = MiRBParent(Node);
+		MiChangeChild(Node, Temp, Parent);
+		Rebalance = NULL;
+		Temp = Parent;
+	} else {
+		PMMADDRESS_NODE Successor = Child, Child2;
 
-    if ((NodeToDelete->LeftChild == NULL) ||
-        (NodeToDelete->RightChild == NULL)) {
+		Temp = Child->LeftChild;
+		if (!Temp) {
+			/*
+			 * Case 2: node's successor is its right child
+			 *
+			 *    (n)          (s)
+			 *    / \          / \
+			 *  (x) (s)  ->  (x) (c)
+			 *        \
+			 *        (c)
+			 */
+			Parent = Successor;
+			Child2 = Successor->RightChild;
+		} else {
+			/*
+			 * Case 3: node's successor is leftmost under
+			 * node's right child subtree
+			 *
+			 *    (n)          (s)
+			 *    / \          / \
+			 *  (x) (y)  ->  (x) (y)
+			 *      /            /
+			 *    (p)          (p)
+			 *    /            /
+			 *  (s)          (c)
+			 *    \
+			 *    (c)
+			 */
+			do {
+				Parent = Successor;
+				Successor = Temp;
+				Temp = Temp->LeftChild;
+			} while (Temp);
+			Child2 = Successor->RightChild;
+			Parent->LeftChild = Child2;
+            Successor->RightChild = Child;
+			MiSetParent(Child, Successor);
+		}
 
-        EasyDelete = NodeToDelete;
-    }
+		Temp = Node->LeftChild;
+		Successor->LeftChild = Temp;
+		MiSetParent(Temp, Successor);
 
-    //
-    // Otherwise, we may as well pick the longest side to delete from (if one is
-    // is longer), as that reduces the probability that we will have to
-    // rebalance.
-    //
+		PC = (ULONG)Node->u1.Parent;
+		Temp = MiRBParent(Node);
+		MiChangeChild(Node, Successor, Temp);
 
-    else if ((SCHAR) NodeToDelete->u1.Balance >= 0) {
+		if (Child2) {
+			MiSetParentColor(Child2, Parent, RB_BLACK);
+			Rebalance = NULL;
+		} else {
+			Rebalance = MiIsBlack(Successor) ? Parent : NULL;
+		}
+		Successor->u1.Parent = (PMMADDRESS_NODE)PC;
+		Temp = Successor;
+	}
+    
+    if (Rebalance && Rebalance != &Table->BalancedRoot) {
+        PMMADDRESS_NODE Node = NULL, Sibling, Temp1, Temp2;
 
-        //
-        // Pick up the subtree successor.
-        //
-
-        EasyDelete = NodeToDelete->RightChild;
-        while (EasyDelete->LeftChild != NULL) {
-            EasyDelete = EasyDelete->LeftChild;
-        }
-    }
-    else {
-
-        //
-        // Pick up the subtree predecessor.
-        //
-
-        EasyDelete = NodeToDelete->LeftChild;
-        while (EasyDelete->RightChild != NULL) {
-            EasyDelete = EasyDelete->RightChild;
-        }
-    }
-
-    //
-    // Rebalancing must know which side of the first parent the delete occurred
-    // on.  Assume it is the left side and otherwise correct below.
-    //
-
-    a = -1;
-
-    //
-    // Now we can do the simple deletion for the no left child case.
-    //
-
-    if (EasyDelete->LeftChild == NULL) {
-
-        Parent = SANITIZE_PARENT_NODE (EasyDelete->u1.Parent);
-
-        if (MiIsLeftChild(EasyDelete)) {
-            Parent->LeftChild = EasyDelete->RightChild;
-        }
-        else {
-            Parent->RightChild = EasyDelete->RightChild;
-            a = 1;
-        }
-
-        if (EasyDelete->RightChild != NULL) {
-            EasyDelete->RightChild->u1.Parent = MI_MAKE_PARENT (Parent, EasyDelete->RightChild->u1.Balance);
-        }
-
-    //
-    // Now we can do the simple deletion for the no right child case,
-    // plus we know there is a left child.
-    //
-
-    }
-    else {
-
-        Parent = SANITIZE_PARENT_NODE (EasyDelete->u1.Parent);
-
-        if (MiIsLeftChild(EasyDelete)) {
-            Parent->LeftChild = EasyDelete->LeftChild;
-        }
-        else {
-            Parent->RightChild = EasyDelete->LeftChild;
-            a = 1;
-        }
-
-        EasyDelete->LeftChild->u1.Parent = MI_MAKE_PARENT (Parent,
-                                            EasyDelete->LeftChild->u1.Balance);
-    }
-
-    //
-    // For delete rebalancing, set the balance at the root to 0 to properly
-    // terminate the rebalance without special tests, and to be able to detect
-    // if the depth of the tree actually decreased.
-    //
-
-    Table->BalancedRoot.u1.Balance = 0;
-    P = SANITIZE_PARENT_NODE (EasyDelete->u1.Parent);
-
-    //
-    // Loop until the tree is balanced.
-    //
-
-    while (TRUE) {
-
-        //
-        // First handle the case where the tree became more balanced.  Zero
-        // the balance factor, calculate a for the next loop and move on to
-        // the parent.
-        //
-
-        if ((SCHAR) P->u1.Balance == a) {
-
-            P->u1.Balance = 0;
-
-        //
-        // If this node is curently balanced, we can show it is now unbalanced
-        // and terminate the scan since the subtree length has not changed.
-        // (This may be the root, since we set Balance to 0 above!)
-        //
-
-        }
-        else if (P->u1.Balance == 0) {
-
-            PRINT("REBADJ D: Node %p, Bal %x -> %x\n", P, P->u1.Balance, -a);
-            COUNT_BALANCE_MAX ((SCHAR)-a);
-            P->u1.Balance = -a;
-
-            //
-            // If we shortened the depth all the way back to the root, then
-            // the tree really has one less level.
-            //
-
-            if (Table->BalancedRoot.u1.Balance != 0) {
-                Table->DepthOfTree -= 1;
-            }
-
-            break;
-
-        //
-        // Otherwise we made the short side 2 levels less than the long side,
-        // and rebalancing is required.  On return, some node has been promoted
-        // to above node P.  If Case 3 from Knuth was not encountered, then we
-        // want to effectively resume rebalancing from P's original parent which
-        // is effectively its grandparent now.
-        //
-
-        }
-        else {
-
-            //
-            // We are done if Case 3 was hit, i.e., the depth of this subtree is
-            // now the same as before the delete.
-            //
-
-            if (MiRebalanceNode(P)) {
+        while (TRUE) {
+            /*
+            * Loop invariants:
+            * - node is black (or NULL on first iteration)
+            * - node is not the root (parent is not NULL)
+            * - All leaf paths going through parent and node have a
+            *   black node count that is 1 lower than other leaf paths.
+            */
+            Sibling = Parent->RightChild;
+            if (Node != Sibling) {	/* node == parent->rb_left */
+                if (MiIsRed(Sibling)) {
+                    /*
+                    * Case 1 - left rotate at parent
+                    *
+                    *     P               S
+                    *    / \             / \
+                    *   N   s    -->    p   Sr
+                    *      / \         / \
+                    *     Sl  Sr      N   Sl
+                    */
+                    Temp1 = Sibling->LeftChild;
+                    Parent->RightChild = Temp1;
+                    Sibling->LeftChild = Parent;
+                    MiSetParentColor(Temp1, Parent, RB_BLACK);
+                    MiRotateSetParents(Parent, Sibling, RB_RED);
+                    Sibling = Temp1;
+                }
+                Temp1 = Sibling->RightChild;
+                if (!Temp1 || MiIsBlack(Temp1)) {
+                    Temp2 = Sibling->LeftChild;
+                    if (!Temp2 || MiIsBlack(Temp2)) {
+                        /*
+                        * Case 2 - sibling color flip
+                        * (p could be either color here)
+                        *
+                        *    (p)           (p)
+                        *    / \           / \
+                        *   N   S    -->  N   s
+                        *      / \           / \
+                        *     Sl  Sr        Sl  Sr
+                        *
+                        * This leaves us violating 5) which
+                        * can be fixed by flipping p to black
+                        * if it was red, or by recursing at p.
+                        * p is red when coming from Case 1.
+                        */
+                        MiSetParentColor(Sibling, Parent, RB_RED);
+                        if (MiIsRed(Parent))
+                            MiSetBlack(Parent);
+                        else {
+                            Node = Parent;
+                            Parent = MiRBParent(Node);
+                            if (Parent && Parent != &Table->BalancedRoot)
+                                continue;
+                        }
+                        break;
+                    }
+                    /*
+                    * Case 3 - right rotate at sibling
+                    * (p could be either color here)
+                    *
+                    *   (p)           (p)
+                    *   / \           / \
+                    *  N   S    -->  N   sl
+                    *     / \             \
+                    *    sl  Sr            S
+                    *                       \
+                    *                        Sr
+                    *
+                    * Note: p might be red, and then both
+                    * p and sl are red after rotation(which
+                    * breaks property 4). This is fixed in
+                    * Case 4 (in __rb_rotate_set_parents()
+                    *         which set sl the color of p
+                    *         and set p RB_BLACK)
+                    *
+                    *   (p)            (sl)
+                    *   / \            /  \
+                    *  N   sl   -->   P    S
+                    *       \        /      \
+                    *        S      N        Sr
+                    *         \
+                    *          Sr
+                    */
+                    Temp1 = Temp2->RightChild;
+                    Sibling->LeftChild = Temp1;
+                    Temp2->RightChild = Sibling;
+                    Parent->RightChild = Temp2;
+                    if (Temp1)
+                        MiSetParentColor(Temp1, Sibling, RB_BLACK);
+                    Temp1 = Sibling;
+                    Sibling = Temp2;
+                }
+                /*
+                * Case 4 - left rotate at parent + color flips
+                * (p and sl could be either color here.
+                *  After rotation, p becomes black, s acquires
+                *  p's color, and sl keeps its color)
+                *
+                *      (p)             (s)
+                *      / \             / \
+                *     N   S     -->   P   Sr
+                *        / \         / \
+                *      (sl) sr      N  (sl)
+                */
+                Temp2 = Sibling->LeftChild;
+                Parent->RightChild = Temp2;
+                Sibling->LeftChild = Parent;
+                MiSetParentColor(Temp1, Sibling, RB_BLACK);
+                if (Temp2)
+                    MiSetParent(Temp2, Parent);
+                MiRotateSetParents(Parent, Sibling, RB_BLACK);
+                break;
+            } else {
+                Sibling = Parent->LeftChild;
+                if (MiIsRed(Sibling)) {
+                    /* Case 1 - right rotate at parent */
+                    Temp1 = Sibling->RightChild;
+                    Parent->LeftChild = Temp1;
+                    Sibling->RightChild = Parent;
+                    MiSetParentColor(Temp1, Parent, RB_BLACK);
+                    MiRotateSetParents(Parent, Sibling, RB_RED);
+                    Sibling = Temp1;
+                }
+                Temp1 = Sibling->LeftChild;
+                if (!Temp1 || MiIsBlack(Temp1)) {
+                    Temp2 = Sibling->RightChild;
+                    if (!Temp2 || MiIsBlack(Temp2)) {
+                        /* Case 2 - sibling color flip */
+                        MiSetParentColor(Sibling, Parent, RB_RED);
+                        if (MiIsRed(Parent))
+                            MiSetBlack(Parent);
+                        else {
+                            Node = Parent;
+                            Parent = MiRBParent(Node);
+                            if (Parent && Parent != &Table->BalancedRoot)
+                                continue;
+                        }
+                        break;
+                    }
+                    /* Case 3 - left rotate at sibling */
+                    Temp1 = Temp2->LeftChild;
+                    Sibling->RightChild = Temp1;
+                    Temp2->LeftChild = Sibling;
+                    Parent->LeftChild = Temp2;
+                    if (Temp1)
+                        MiSetParentColor(Temp1, Sibling, RB_BLACK);
+                    Temp1 = Sibling;
+                    Sibling = Temp2;
+                }
+                /* Case 4 - right rotate at parent + color flips */
+                Temp2 = Sibling->RightChild;
+                Parent->LeftChild = Temp2;
+                Sibling->RightChild = Parent;
+                MiSetParentColor(Temp1, Sibling, RB_BLACK);
+                if (Temp2)
+                    MiSetParent(Temp2, Parent);
+                MiRotateSetParents(Parent, Sibling, RB_BLACK);
                 break;
             }
-
-            P = SANITIZE_PARENT_NODE (P->u1.Parent);
-        }
-
-        a = -1;
-        if (MiIsRightChild(P)) {
-            a = 1;
-        }
-        P = SANITIZE_PARENT_NODE (P->u1.Parent);
-    }
-
-    //
-    // Finally, if we actually deleted a predecessor/successor of the
-    // NodeToDelete, we will link him back into the tree to replace
-    // NodeToDelete before returning.  Note that NodeToDelete did have
-    // both child links filled in, but that may no longer be the case
-    // at this point.
-    //
-
-    if (NodeToDelete != EasyDelete) {
-
-        //
-        // Note carefully - VADs are of differing sizes therefore it is not safe
-        // to just overlay the EasyDelete node with the NodeToDelete like the
-        // rtl avl code does.
-        //
-        // Copy just the links, preserving the rest of the original EasyDelete
-        // VAD.
-        //
-
-        EasyDelete->u1.Parent = NodeToDelete->u1.Parent;
-        EasyDelete->LeftChild = NodeToDelete->LeftChild;
-        EasyDelete->RightChild = NodeToDelete->RightChild;
-
-        if (MiIsLeftChild(NodeToDelete)) {
-            Parent = SANITIZE_PARENT_NODE (EasyDelete->u1.Parent);
-            Parent->LeftChild = EasyDelete;
-        }
-        else {
-            ASSERT(MiIsRightChild(NodeToDelete));
-            Parent = SANITIZE_PARENT_NODE (EasyDelete->u1.Parent);
-            Parent->RightChild = EasyDelete;
-        }
-        if (EasyDelete->LeftChild != NULL) {
-            EasyDelete->LeftChild->u1.Parent = MI_MAKE_PARENT (EasyDelete,
-                                            EasyDelete->LeftChild->u1.Balance);
-        }
-        if (EasyDelete->RightChild != NULL) {
-            EasyDelete->RightChild->u1.Parent = MI_MAKE_PARENT (EasyDelete,
-                                            EasyDelete->RightChild->u1.Balance);
         }
     }
 
     Table->NumberGenericTableElements -= 1;
 
-    //
-    // Sanity check tree size and depth.
-    //
-
-    ASSERT((Table->NumberGenericTableElements >= MiWorstCaseFill[Table->DepthOfTree]) &&
-           (Table->NumberGenericTableElements <= MiBestCaseFill[Table->DepthOfTree]));
-
     return;
 }
+// END MODIFY
 
 
 PMMADDRESS_NODE
@@ -1289,6 +1401,8 @@ Return Value:
     Table->BalancedRoot.u1.Parent = MI_MAKE_PARENT (&Table->BalancedRoot, 0);
 }
 
+// MODIFY Xiaoyang Ma, 2020/5/29
+// Change MiInsertNode into rbtree
 
 VOID
 FASTCALL
@@ -1328,9 +1442,6 @@ Environment:
     PMMADDRESS_NODE NodeOrParent;
     TABLE_SEARCH_RESULT SearchResult;
 
-    ASSERT((Table->NumberGenericTableElements >= MiWorstCaseFill[Table->DepthOfTree]) &&
-           (Table->NumberGenericTableElements <= MiBestCaseFill[Table->DepthOfTree]));
-
     SearchResult = MiFindNodeOrParent (Table,
                                        NodeToInsert->StartingVpn,
                                        &NodeOrParent);
@@ -1357,19 +1468,17 @@ Environment:
     if (SearchResult == TableEmptyTree) {
 
         Table->BalancedRoot.RightChild = NodeToInsert;
-        NodeToInsert->u1.Parent = &Table->BalancedRoot;
-        ASSERT (NodeToInsert->u1.Balance == 0);
+        NodeToInsert->u1.Parent = MI_MAKE_PARENT(&Table->BalancedRoot, RB_BLACK);
+        ASSERT (NodeToInsert->u1.Balance == RB_BLACK);
         ASSERT(Table->DepthOfTree == 0);
         Table->DepthOfTree = 1;
-
-    ASSERT((Table->NumberGenericTableElements >= MiWorstCaseFill[Table->DepthOfTree]) &&
-           (Table->NumberGenericTableElements <= MiBestCaseFill[Table->DepthOfTree]));
 
     }
     else {
 
-        PMMADDRESS_NODE R = NodeToInsert;
-        PMMADDRESS_NODE S = NodeOrParent;
+        PMMADDRESS_NODE Node = NodeToInsert;
+        PMMADDRESS_NODE Parent = NodeOrParent;
+        PMMADDRESS_NODE GParent, Temp;
 
         if (SearchResult == TableInsertAsLeft) {
             NodeOrParent->LeftChild = NodeToInsert;
@@ -1378,117 +1487,138 @@ Environment:
             NodeOrParent->RightChild = NodeToInsert;
         }
 
-        NodeToInsert->u1.Parent = NodeOrParent;
-        ASSERT (NodeToInsert->u1.Balance == 0);
+        Node->u1.Parent = MI_MAKE_PARENT(Parent, RB_RED);;
+        ASSERT (NodeToInsert->u1.Balance == RB_RED);
 
-        //
-        // The above completes the standard binary tree insertion, which
-        // happens to correspond to steps A1-A5 of Knuth's "balanced tree
-        // search and insertion" algorithm.  Now comes the time to adjust
-        // balance factors and possibly do a single or double rotation as
-        // in steps A6-A10.
-        //
-        // Set the Balance factor in the root to a convenient value
-        // to simplify loop control.
-        //
-
-        PRINT("REBADJ E: Table %p, Bal %x -> %x\n", Table, Table->BalancedRoot.u1.Balance, -1);
-        COUNT_BALANCE_MAX ((SCHAR)-1);
-        Table->BalancedRoot.u1.Balance = (ULONG_PTR) -1;
-
-        //
-        // Now loop to adjust balance factors and see if any balance operations
-        // must be performed, using NodeOrParent to ascend the tree.
-        //
-
-        do {
-
-            SCHAR a;
-
-            //
-            // Calculate the next adjustment.
-            //
-
-            a = 1;
-            if (MiIsLeftChild (R)) {
-                a = -1;
+        while (TRUE) {
+            /*
+            * Loop invariant: node is red.
+            */
+            if (SANITIZE_PARENT_NODE(Parent) == &Table->BalancedRoot) {
+                /*
+                * The inserted node is root. Either this is the
+                * first node, or we recursed at Case 1 below and
+                * are no longer violating 4).
+                */
+                MiSetParentColor(Node, &Table->BalancedRoot, RB_BLACK);
+                break;
             }
 
-            PRINT("LW 0: Table %p, Bal %x, %x\n", Table, Table->BalancedRoot.u1.Balance, a);
-            PRINT("LW 0: R Node %p, Bal %x, %x\n", R, R->u1.Balance, 1);
-            PRINT("LW 0: S Node %p, Bal %x, %x\n", S, S->u1.Balance, 1);
+            /*
+            * If there is a black parent, we are done.
+            * Otherwise, take some corrective action as,
+            * per 4), we don't want a red root or two
+            * consecutive red nodes.
+            */
+            if (MiIsBlack(Parent))
+                break;
 
-            //
-            // If this node was balanced, show that it is no longer and
-            // keep looping.  This is essentially A6 of Knuth's algorithm,
-            // where he updates all of the intermediate nodes on the
-            // insertion path which previously had balance factors of 0.
-            // We are looping up the tree via Parent pointers rather than
-            // down the tree as in Knuth.
-            //
+            GParent = MiRBParent(Parent);
 
-            if (S->u1.Balance == 0) {
-
-                PRINT("REBADJ F: Node %p, Bal %x -> %x\n", S, S->u1.Balance, a);
-                COUNT_BALANCE_MAX ((SCHAR)a);
-                S->u1.Balance = a;
-                R = S;
-                S = SANITIZE_PARENT_NODE (S->u1.Parent);
-            }
-            else if ((SCHAR) S->u1.Balance != a) {
-
-                PRINT("LW 1: Table %p, Bal %x, %x\n", Table, Table->BalancedRoot.u1.Balance, -1);
-
-                //
-                // If this node has the opposite balance, then the tree got
-                // more balanced (or we hit the root) and we are done.
-                //
-                // Step A7.ii
-                //
-
-                S->u1.Balance = 0;
-
-                //
-                // If S is actually the root, then this means the depth
-                // of the tree just increased by 1!  (This is essentially
-                // A7.i, but we just initialized the root balance to force
-                // it through here.)
-                //
-
-                if (Table->BalancedRoot.u1.Balance == 0) {
-                    Table->DepthOfTree += 1;
+            Temp = GParent->RightChild;
+            if (Parent != Temp) {	/* Parent == GParent->LeftChild */
+                if (Temp && MiIsRed(Temp)) {
+                    /*
+                    * Case 1 - node's uncle is red (color flips).
+                    *
+                    *       G            g
+                    *      / \          / \
+                    *     p   u  -->   P   U
+                    *    /            /
+                    *   n            n
+                    *
+                    * However, since g's parent might be red, and
+                    * 4) does not allow this, we need to recurse
+                    * at g.
+                    */
+                    MiSetParentColor(Temp, GParent, RB_BLACK);
+                    MiSetParentColor(Parent, GParent, RB_BLACK);
+                    Node = GParent;
+                    Parent = MiRBParent(Node);
+                    MiSetParentColor(Node, Parent, RB_RED);
+                    continue;
                 }
 
+                Temp = Parent->RightChild;
+                if (Node == Temp) {
+                    /*
+                    * Case 2 - node's uncle is black and node is
+                    * the parent's right child (left rotate at parent).
+                    *
+                    *      G             G
+                    *     / \           / \
+                    *    p   U  -->    n   U
+                    *     \           /
+                    *      n         p
+                    *
+                    * This still leaves us in violation of 4), the
+                    * continuation into Case 3 will fix that.
+                    */
+                    Temp = Node->LeftChild;
+                    Parent->RightChild = Temp;
+                    Node->LeftChild = Parent;
+                    if (Temp)
+                        MiSetParentColor(Temp, Parent, RB_BLACK);
+                    MiSetParentColor(Parent, Node, RB_RED);
+                    Parent = Node;
+                    Temp = Node->RightChild;
+                }
+
+                /*
+                * Case 3 - node's uncle is black and node is
+                * the parent's left child (right rotate at gparent).
+                *
+                *        G           P
+                *       / \         / \
+                *      p   U  -->  n   g
+                *     /                 \
+                *    n                   U
+                */
+                GParent->LeftChild = Temp; /* == Parent->RightChild */
+                Parent->RightChild = GParent;
+                if (Temp)
+                    MiSetParentColor(Temp, GParent, RB_BLACK);
+                MiRotateSetParents(GParent, Parent, RB_RED);
+                break;
+            } else {
+                Temp = GParent->LeftChild;
+                if (Temp && MiIsRed(Temp)) {
+                    /* Case 1 - color flips */
+                    MiSetParentColor(Temp, GParent, RB_BLACK);
+                    MiSetParentColor(Parent, GParent, RB_BLACK);
+                    Node = GParent;
+                    Parent = MiRBParent(Node);
+                    MiSetParentColor(Node, Parent, RB_RED);
+                    continue;
+                }
+
+                Temp = Parent->LeftChild;
+                if (Node == Temp) {
+                    /* Case 2 - right rotate at parent */
+                    Temp = Node->RightChild;
+                    Parent->LeftChild = Temp;
+                    Node->RightChild = Parent;
+                    if (Temp)
+                        MiSetParentColor(Temp, Parent, RB_BLACK);
+                    MiSetParentColor(Parent, Node, RB_RED);
+                    Parent = Node;
+                    Temp = Node->LeftChild;
+                }
+
+                /* Case 3 - left rotate at gparent */
+                GParent->RightChild = Temp; /* == Parent->LeftChild */
+                Parent->LeftChild = GParent;
+                if (Temp)
+                    MiSetParentColor(Temp, GParent, RB_BLACK);
+                MiRotateSetParents(GParent, Parent, RB_RED);
                 break;
             }
-            else {
-
-                PRINT("LW 2: Table %p, Bal %x, %x\n", Table, Table->BalancedRoot.u1.Balance, -1);
-
-                //
-                // The tree became unbalanced (path length differs
-                // by 2 below us) and we need to do one of the balancing
-                // operations, and then we are done.  The RebalanceNode routine
-                // does steps A7.iii, A8 and A9.
-                //
-
-                MiRebalanceNode (S);
-                break;
-            }
-            PRINT("LW 3: Table %p, Bal %x, %x\n", Table, Table->BalancedRoot.u1.Balance, -1);
-        } while (TRUE);
-        PRINT("LW 4: Table %p, Bal %x, %x\n", Table, Table->BalancedRoot.u1.Balance, -1);
-    }
-
-    //
-    // Sanity check tree size and depth.
-    //
-
-    ASSERT((Table->NumberGenericTableElements >= MiWorstCaseFill[Table->DepthOfTree]) &&
-           (Table->NumberGenericTableElements <= MiBestCaseFill[Table->DepthOfTree]));
-
+        }
+	}
+    
     return;
 }
+// END MODIFY
 
 
 PVOID
