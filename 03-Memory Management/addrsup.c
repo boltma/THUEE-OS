@@ -149,7 +149,7 @@ MiEnumerateGenericTableWithoutSplayingAvl (
     )
 
 // MODIFY Xiaoyang Ma, 2020/5/29
-// Add macros and inline functions similar to Linux rbtree
+// Add macros and functions similar to Linux rbtree
 #define MiIsBlack(Links) (                                        \
     (Links->u1.Balance == RB_BLACK)                               \
     )
@@ -216,7 +216,24 @@ MiSetBlack(
     Links->u1.Parent = MI_MAKE_PARENT(MiRBParent(Links), RB_BLACK);
 }
 
+VOID
+MiPrintTreePreOrder(
+    IN PMMADDRESS_NODE Links
+)
+{
+    DbgPrint("Node %u, Parent %u, %u - %u, Color %d\n",
+              (ULONG)Links,
+              (ULONG)Links->u1.Parent,
+              Links->StartingVpn,
+              Links->EndingVpn,
+              Links->u1.Balance);
+    if (Links->LeftChild)
+		MiPrintTreePreOrder(Links->LeftChild);
+	if (Links->RightChild)
+		MiPrintTreePreOrder(Links->RightChild);
+}
 // END MODIFY
+
 
 
 #if DBG
@@ -877,7 +894,7 @@ Environment:
 }
 
 // MODIFY Xiaoyang Ma, 2020/5/29
-// Change MiInsertNode into rbtree
+// Change MiRemoveNode into rbtree
 
 VOID
 FASTCALL
@@ -920,6 +937,9 @@ Environment:
 	PMMADDRESS_NODE Temp = NodeToDelete->LeftChild;
 	PMMADDRESS_NODE Parent, Rebalance;
 	ULONG PC;
+    
+    DbgPrint("Remove node begin, node %u, tree %u.\n", (ULONG)NodeToDelete, (ULONG)(&Table->BalancedRoot));
+    MiPrintTreePreOrder(&Table->BalancedRoot);
 
 	if (!Temp) {
 		/*
@@ -929,6 +949,7 @@ Environment:
 		 * and node must be black due to 4). We adjust colors locally
 		 * so as to bypass __rb_erase_color() later on.
 		 */
+        DbgPrint("Remove case 1 right.\n");
 		PC = (ULONG)Node->u1.Parent;
 		Parent = MiRBParent(Node);
 		MiChangeChild(Node, Child, Parent);
@@ -940,6 +961,7 @@ Environment:
 		Temp = Parent;
 	} else if (!Child) {
 		/* Still case 1, but this time the child is Node->LeftChild */
+        DbgPrint("Remove case 1 left.\n");
 		PC = (ULONG)Node->u1.Parent;
         Temp->u1.Parent = (PMMADDRESS_NODE)PC;
 		Parent = MiRBParent(Node);
@@ -960,6 +982,7 @@ Environment:
 			 *        \
 			 *        (c)
 			 */
+            DbgPrint("Remove case 2.\n");
 			Parent = Successor;
 			Child2 = Successor->RightChild;
 		} else {
@@ -977,6 +1000,7 @@ Environment:
 			 *    \
 			 *    (c)
 			 */
+            DbgPrint("Remove case 3.\n");
 			do {
 				Parent = Successor;
 				Successor = Temp;
@@ -1006,6 +1030,7 @@ Environment:
 		Temp = Successor;
 	}
     
+    DbgPrint("Remove rebalance %u.\n", (ULONG)Rebalance);
     if (Rebalance && Rebalance != &Table->BalancedRoot) {
         PMMADDRESS_NODE Node = NULL, Sibling, Temp1, Temp2;
 
@@ -1018,7 +1043,7 @@ Environment:
             *   black node count that is 1 lower than other leaf paths.
             */
             Sibling = Parent->RightChild;
-            if (Node != Sibling) {	/* node == parent->rb_left */
+            if (Node != Sibling) {	/* Node == Parent->LeftChild */
                 if (MiIsRed(Sibling)) {
                     /*
                     * Case 1 - left rotate at parent
@@ -1029,6 +1054,7 @@ Environment:
                     *      / \         / \
                     *     Sl  Sr      N   Sl
                     */
+                    DbgPrint("Remove rebalance case 1.\n");
                     Temp1 = Sibling->LeftChild;
                     Parent->RightChild = Temp1;
                     Sibling->LeftChild = Parent;
@@ -1055,6 +1081,7 @@ Environment:
                         * if it was red, or by recursing at p.
                         * p is red when coming from Case 1.
                         */
+                        DbgPrint("Remove rebalance case 2.\n");
                         MiSetParentColor(Sibling, Parent, RB_RED);
                         if (MiIsRed(Parent))
                             MiSetBlack(Parent);
@@ -1093,6 +1120,7 @@ Environment:
                     *         \
                     *          Sr
                     */
+                    DbgPrint("Remove rebalance case 3.\n");
                     Temp1 = Temp2->RightChild;
                     Sibling->LeftChild = Temp1;
                     Temp2->RightChild = Sibling;
@@ -1114,6 +1142,7 @@ Environment:
                 *        / \         / \
                 *      (sl) sr      N  (sl)
                 */
+                DbgPrint("Remove rebalance case 4.\n");
                 Temp2 = Sibling->LeftChild;
                 Parent->RightChild = Temp2;
                 Sibling->LeftChild = Parent;
@@ -1126,6 +1155,7 @@ Environment:
                 Sibling = Parent->LeftChild;
                 if (MiIsRed(Sibling)) {
                     /* Case 1 - right rotate at parent */
+                    DbgPrint("Remove rebalance case 1\'.\n");
                     Temp1 = Sibling->RightChild;
                     Parent->LeftChild = Temp1;
                     Sibling->RightChild = Parent;
@@ -1138,6 +1168,7 @@ Environment:
                     Temp2 = Sibling->RightChild;
                     if (!Temp2 || MiIsBlack(Temp2)) {
                         /* Case 2 - sibling color flip */
+                        DbgPrint("Remove rebalance case 2\'.\n");
                         MiSetParentColor(Sibling, Parent, RB_RED);
                         if (MiIsRed(Parent))
                             MiSetBlack(Parent);
@@ -1150,6 +1181,7 @@ Environment:
                         break;
                     }
                     /* Case 3 - left rotate at sibling */
+                    DbgPrint("Remove rebalance case 3\'.\n");
                     Temp1 = Temp2->LeftChild;
                     Sibling->RightChild = Temp1;
                     Temp2->LeftChild = Sibling;
@@ -1160,6 +1192,7 @@ Environment:
                     Sibling = Temp2;
                 }
                 /* Case 4 - right rotate at parent + color flips */
+                DbgPrint("Remove rebalance case 4\'.\n");
                 Temp2 = Sibling->RightChild;
                 Parent->LeftChild = Temp2;
                 Sibling->RightChild = Parent;
@@ -1173,6 +1206,8 @@ Environment:
     }
 
     Table->NumberGenericTableElements -= 1;
+    DbgPrint("Remove node finish.\n");
+    MiPrintTreePreOrder(&Table->BalancedRoot);
 
     return;
 }
@@ -1438,9 +1473,11 @@ Environment:
     // Holds a pointer to the node in the table or what would be the
     // parent of the node.
     //
-
     PMMADDRESS_NODE NodeOrParent;
     TABLE_SEARCH_RESULT SearchResult;
+    
+    DbgPrint("Insert node begin, node %u, tree %u.\n", (ULONG)NodeToInsert, (ULONG)(&Table->BalancedRoot));
+    MiPrintTreePreOrder(&Table->BalancedRoot);
 
     SearchResult = MiFindNodeOrParent (Table,
                                        NodeToInsert->StartingVpn,
@@ -1466,7 +1503,7 @@ Environment:
     //
 
     if (SearchResult == TableEmptyTree) {
-
+        DbgPrint("Insert empty tree.\n");
         Table->BalancedRoot.RightChild = NodeToInsert;
         NodeToInsert->u1.Parent = MI_MAKE_PARENT(&Table->BalancedRoot, RB_BLACK);
         ASSERT (NodeToInsert->u1.Balance == RB_BLACK);
@@ -1475,10 +1512,11 @@ Environment:
 
     }
     else {
-
         PMMADDRESS_NODE Node = NodeToInsert;
         PMMADDRESS_NODE Parent = NodeOrParent;
         PMMADDRESS_NODE GParent, Temp;
+        
+        DbgPrint("Insert non-empty tree.\n");
 
         if (SearchResult == TableInsertAsLeft) {
             NodeOrParent->LeftChild = NodeToInsert;
@@ -1494,12 +1532,13 @@ Environment:
             /*
             * Loop invariant: node is red.
             */
-            if (SANITIZE_PARENT_NODE(Parent) == &Table->BalancedRoot) {
+            if (MiRBParent(Node) == &Table->BalancedRoot) {
                 /*
                 * The inserted node is root. Either this is the
                 * first node, or we recursed at Case 1 below and
                 * are no longer violating 4).
                 */
+                DbgPrint("Insert root.\n");
                 MiSetParentColor(Node, &Table->BalancedRoot, RB_BLACK);
                 break;
             }
@@ -1531,6 +1570,7 @@ Environment:
                     * 4) does not allow this, we need to recurse
                     * at g.
                     */
+                    DbgPrint("Insert case 1.\n");
                     MiSetParentColor(Temp, GParent, RB_BLACK);
                     MiSetParentColor(Parent, GParent, RB_BLACK);
                     Node = GParent;
@@ -1554,6 +1594,7 @@ Environment:
                     * This still leaves us in violation of 4), the
                     * continuation into Case 3 will fix that.
                     */
+                    DbgPrint("Insert case 2.\n");
                     Temp = Node->LeftChild;
                     Parent->RightChild = Temp;
                     Node->LeftChild = Parent;
@@ -1574,6 +1615,7 @@ Environment:
                 *     /                 \
                 *    n                   U
                 */
+                DbgPrint("Insert case 3.\n");
                 GParent->LeftChild = Temp; /* == Parent->RightChild */
                 Parent->RightChild = GParent;
                 if (Temp)
@@ -1584,6 +1626,7 @@ Environment:
                 Temp = GParent->LeftChild;
                 if (Temp && MiIsRed(Temp)) {
                     /* Case 1 - color flips */
+                    DbgPrint("Insert case 1\'.\n");
                     MiSetParentColor(Temp, GParent, RB_BLACK);
                     MiSetParentColor(Parent, GParent, RB_BLACK);
                     Node = GParent;
@@ -1595,6 +1638,7 @@ Environment:
                 Temp = Parent->LeftChild;
                 if (Node == Temp) {
                     /* Case 2 - right rotate at parent */
+                    DbgPrint("Insert case 2\'.\n");
                     Temp = Node->RightChild;
                     Parent->LeftChild = Temp;
                     Node->RightChild = Parent;
@@ -1606,6 +1650,7 @@ Environment:
                 }
 
                 /* Case 3 - left rotate at gparent */
+                DbgPrint("Insert case 3\'.\n");
                 GParent->RightChild = Temp; /* == Parent->LeftChild */
                 Parent->LeftChild = GParent;
                 if (Temp)
@@ -1615,6 +1660,9 @@ Environment:
             }
         }
 	}
+    
+    DbgPrint("Insert node finish.\n");
+    MiPrintTreePreOrder(&Table->BalancedRoot);
     
     return;
 }
